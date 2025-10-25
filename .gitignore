@@ -1,0 +1,10 @@
+# Logs
+*.log
+
+# Trained Models
+*.pt
+*.onnx
+*.joblib
+
+# Python
+__pycache__/
