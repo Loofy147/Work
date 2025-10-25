@@ -1,4 +1,10 @@
 numpy
 trimesh
+scikit-fem
+meshio
+torch
+torch_geometric
 PyniteFEA
 scikit-learn
+onnx
+onnxscript

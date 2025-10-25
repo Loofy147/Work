@@ -1,64 +1,104 @@
-import numpy as np
-import trimesh
 import os
-import joblib
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
+import torch
+import torch.nn.functional as F
+from torch_geometric.data import Dataset, Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv
+import trimesh
+import numpy as np
 
 # --- Configuration ---
-DATASET_DIR = "ml/dataset"
-MODEL_PATH = "ml/surrogate_model.joblib"
+DATASET_DIR = "ml/dataset_v2"
+MODEL_PATH = "ml/gnn_surrogate_model.pt"
+NUM_EPOCHS = 100
+BATCH_SIZE = 10
+LEARNING_RATE = 0.01
 
-def load_dataset():
-    """Loads the dataset from the dataset directory."""
-    features = []
-    labels = []
+# 1. Custom Dataset
+class BeamDataset(Dataset):
+    def __init__(self, root, transform=None, pre_transform=None):
+        super(BeamDataset, self).__init__(root, transform, pre_transform)
 
-    for filename in os.listdir(DATASET_DIR):
-        if filename.endswith(".ply"):
-            # Load the mesh
-            mesh_path = os.path.join(DATASET_DIR, filename)
-            mesh = trimesh.load(mesh_path)
+    @property
+    def raw_file_names(self):
+        return [f for f in os.listdir(self.raw_dir) if f.endswith('.ply')]
 
-            # Extract features (length, width, height)
-            length, width, height = mesh.extents
-            features.append([length, width, height])
+    @property
+    def processed_file_names(self):
+        return [f'data_{i}.pt' for i in range(len(self.raw_file_names))]
 
-            # Load the corresponding label
-            result_path = os.path.join(DATASET_DIR, filename.replace(".ply", ".txt"))
-            with open(result_path, "r") as f:
-                label = float(f.read())
-            labels.append(label)
+    def download(self):
+        pass # Data is already in raw_dir
 
-    return np.array(features), np.array(labels)
+    def process(self):
+        idx = 0
+        for raw_path in self.raw_paths:
+            # Load mesh
+            mesh = trimesh.load(raw_path)
 
-def train_model(X, y):
-    """Trains a RandomForestRegressor model."""
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            # Node features are the vertex coordinates
+            x = torch.tensor(mesh.vertices, dtype=torch.float)
 
-    model = RandomForestRegressor(n_estimators=100, random_state=42)
-    model.fit(X_train, y_train)
+            # Edge index from mesh faces
+            edge_index = torch.tensor(mesh.edges.T, dtype=torch.long)
 
-    # Evaluate the model
-    y_pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, y_pred)
-    print(f"Model Mean Squared Error: {mse}")
+            # Target values (stress)
+            stress_path = raw_path.replace('.ply', '_stress.txt')
+            y = torch.tensor(np.loadtxt(stress_path), dtype=torch.float).unsqueeze(1)
+
+            data = Data(x=x, edge_index=edge_index, y=y)
+            torch.save(data, os.path.join(self.processed_dir, f'data_{idx}.pt'))
+            idx += 1
+
+    def len(self):
+        return len(self.processed_file_names)
+
+    def get(self, idx):
+        data = torch.load(os.path.join(self.processed_dir, f'data_{idx}.pt'), weights_only=False)
+        return data
+
+# 2. GNN Architecture
+class GNN(torch.nn.Module):
+    def __init__(self):
+        super(GNN, self).__init__()
+        self.conv1 = GCNConv(3, 16)
+        self.conv2 = GCNConv(16, 1)
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = self.conv2(x, edge_index)
+        return x
+
+# 3. Training Loop
+def train():
+    dataset = BeamDataset(root=DATASET_DIR)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = GNN().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    model.train()
+    for epoch in range(NUM_EPOCHS):
+        total_loss = 0
+        for data in loader:
+            data = data.to(device)
+            optimizer.zero_grad()
+            out = model(data.x, data.edge_index)
+            loss = F.mse_loss(out, data.y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * data.num_graphs
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS}, Loss: {total_loss / len(loader.dataset)}")
 
     return model
 
-def main():
-    """Loads the dataset, trains the model, and saves it."""
-    print("Loading dataset...")
-    X, y = load_dataset()
-
-    print("Training model...")
-    model = train_model(X, y)
+if __name__ == "__main__":
+    print("Training GNN surrogate model...")
+    trained_model = train()
 
     print(f"Saving model to {MODEL_PATH}...")
-    joblib.dump(model, MODEL_PATH)
+    torch.save(trained_model.state_dict(), MODEL_PATH)
 
     print("Model training complete.")
-
-if __name__ == "__main__":
-    main()
