@@ -2,8 +2,9 @@
 *.log
 
 # Trained Models
+# .onnx is temporarily included for this submission to be runnable.
+# In a real project, this would be downloaded from a model registry.
 *.pt
-*.onnx
 *.joblib
 
 # Python
